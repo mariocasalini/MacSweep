@@ -1,0 +1,14 @@
+{
+  "artifact": "MacSweep.app.zip",
+  "sha256": "313484f962cb7fcdfed80b48406be9a889e3f6b2ac94af20ae18717b3f47a2e3",
+  "bytes": 401450,
+  "architecture": "arm64",
+  "deploymentTarget": "macOS 13.0",
+  "testedOS": "macOS 26.2",
+  "signature": "ad-hoc; verified --deep --strict after archive extraction into local temporary directory",
+  "notarized": false,
+  "scannerFixtureChecks": 27,
+  "safetyFixtureChecks": 13,
+  "junkFixtureChecks": 20,
+  "totalFixtureChecks": 60
+}

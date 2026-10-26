@@ -1,0 +1,36 @@
+Scanner: 27 fixture checks passed
+PASS authorized descendant
+PASS reject scan root itself
+PASS path boundary rejects sibling prefix
+PASS reject parent containing scan root
+PASS system protection cannot be overridden
+PASS reject symbolic link
+PASS reject symlink ancestor
+PASS explicit individual artifact
+PASS cache root is always protected
+PASS shared group container is protected
+PASS corrupt history fails closed
+PASS no deletion with corrupt history
+PASS file survives rejected operation
+Safety tests complete; no real files were moved to Trash.
+PASS default user cache/log roots
+PASS containers excluded by default
+PASS known browser cache classification
+PASS symlinks and packages ignored
+PASS opt-in exact container cache/log suffixes
+PASS container bundle ID ending app is admitted
+PASS app-suffix container contents outside exact roots untouched
+PASS container browser bundle classification
+PASS documents preferences localstorage shared and unrelated data excluded
+PASS symlink container ignored
+PASS excluded file does not skip sibling
+PASS directory and container-root exclusions
+PASS whole-root exclusion preserves other root
+PASS prestart cancellation
+PASS mid-inventory cancellation returns bounded partial result
+PASS device/inode snapshots populated
+PASS fixture stat available
+PASS snapshot size and stat mtime match
+PASS missing roots are not errors
+PASS all excluded fixture data remains untouched
+Junk scanner tests complete; only generated fake-home fixtures were read.
