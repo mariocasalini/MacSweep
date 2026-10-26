@@ -50,7 +50,7 @@ final class Scanner {
         .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey,
     ]
 
-    func scan(options: ScanOptions, cancelled: () -> Bool = { false }, progress: (Int) -> Void = { _ in }, phase: (String) -> Void = { _ in }) -> ScanResult {
+    func scan(options: ScanOptions, cancelled: () -> Bool = { false }, progress: (Int) -> Void = { _ in }, phase: (String) -> Void = { _ in }, inventory: ([FileEntry]) -> Void = { _ in }) -> ScanResult {
         phase("Lettura delle cartelle…")
         var files: [FileEntry] = []
         var issues: [String] = []
@@ -74,6 +74,12 @@ final class Scanner {
             if contains(path, in: admittedRoots) || excludedPath(path) { continue }
             do {
                 let values = try root.resourceValues(forKeys: keys)
+                var rootState = stat()
+                guard lstat(path, &rootState) == 0, rootState.st_flags & UInt32(SF_DATALESS) == 0,
+                      !(values.isUbiquitousItem == true && values.ubiquitousItemDownloadingStatus == .notDownloaded) else {
+                    issue("Cartella cloud non scaricata o non accessibile, ignorata: \(path)")
+                    continue
+                }
                 guard values.isDirectory == true, values.isSymbolicLink != true,
                       root.resolvingSymlinksInPath().path == path, values.isPackage != true else {
                     issue("Cartella ignorata: collegamento, pacchetto o percorso non valido: \(path)")
@@ -84,63 +90,80 @@ final class Scanner {
                 issue("Impossibile leggere \(path): \(error.localizedDescription)")
                 continue
             }
-            guard let enumerator = manager.enumerator(at: root, includingPropertiesForKeys: Array(keys),
-                                                       options: [.skipsHiddenFiles, .skipsPackageDescendants],
-                                                       errorHandler: { url, error in
-                issue("Impossibile leggere \(url.path): \(error.localizedDescription)")
-                return true
-            }) else {
-                issue("Impossibile esaminare la cartella: \(path)")
-                continue
-            }
-            for case let url as URL in enumerator {
-                if cancelled() { break }
-                let path = url.standardizedFileURL.path
-                if excludedPath(path) {
-                    if (try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])).map({ $0.isDirectory == true && $0.isSymbolicLink != true }) == true {
-                        enumerator.skipDescendants()
-                    }
-                    continue
+            // Open each directory once. Child metadata is read relative to that
+            // descriptor, avoiding resolution of every ancestor for every file.
+            func walk(_ directory: URL, descriptor: Int32) {
+                guard let stream = fdopendir(descriptor) else {
+                    let failure = errno
+                    Darwin.close(descriptor)
+                    issue("Impossibile esaminare \(directory.path): \(String(cString: strerror(failure)))")
+                    return
                 }
-                do {
-                    let value = try url.resourceValues(forKeys: keys)
-                    if value.isSymbolicLink == true || value.isPackage == true {
-                        // The enumerator already skips both. Calling skipDescendants
-                        // on a link/package can incorrectly skip the next sibling.
+                defer { closedir(stream) }
+                while !cancelled() {
+                    errno = 0
+                    guard let item = readdir(stream) else {
+                        if errno != 0 { issue("Impossibile leggere \(directory.path): \(String(cString: strerror(errno)))") }
+                        break
+                    }
+                    let name = withUnsafePointer(to: &item.pointee.d_name) {
+                        $0.withMemoryRebound(to: CChar.self, capacity: Int(item.pointee.d_namlen) + 1) { String(cString: $0) }
+                    }
+                    if name.hasPrefix(".") { continue }
+                    let url = directory.appendingPathComponent(name)
+                    let path = url.path
+                    if excludedPath(path) { continue }
+                    var state = stat()
+                    guard fstatat(dirfd(stream), name, &state, AT_SYMLINK_NOFOLLOW) == 0 else {
+                        issue("Impossibile leggere \(path): \(String(cString: strerror(errno)))")
                         continue
                     }
-                    var fileState = stat()
-                    guard lstat(path, &fileState) == 0 else {
-                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-                    }
-                    let isDataless = fileState.st_flags & UInt32(SF_DATALESS) != 0
-                    if isDataless || (value.isRegularFile == true && value.isUbiquitousItem == true && value.ubiquitousItemDownloadingStatus == .notDownloaded) {
-                        if value.isDirectory == true { enumerator.skipDescendants() }
+                    let kind = state.st_mode & S_IFMT
+                    if kind == S_IFLNK || state.st_flags & UInt32(UF_HIDDEN) != 0 { continue }
+                    if state.st_flags & UInt32(SF_DATALESS) != 0 {
                         issue("File iCloud non scaricato, ignorato: \(path)")
                         continue
                     }
-                    guard value.isRegularFile == true, fileState.st_mode & S_IFMT == S_IFREG,
-                          url.resolvingSymlinksInPath().path == path,
-                          visited.insert(path).inserted else { continue }
-                    let size = Int64(fileState.st_size)
-                    let name = url.lastPathComponent
-                    let ext = url.pathExtension.lowercased()
-                    var category = "largest"
-                    if root.lastPathComponent == "Downloads" || path.contains("/Downloads/") { category = "downloads" }
-                    if installerExtensions.contains(ext) { category = "installers" }
-                    if isScreenshot(url) { category = "screenshots" }
-                    files.append(FileEntry(id: path, url: url, name: name, size: size,
-                                           modified: modificationDate(fileState),
-                                           created: value.creationDate ?? value.contentModificationDate ?? .distantPast,
-                                           category: category,
-                                           snapshotDevice: UInt64(UInt32(bitPattern: fileState.st_dev)),
-                                           snapshotInode: UInt64(fileState.st_ino)))
-                    scannedCount += 1
-                    if scannedCount % 100 == 0 { progress(scannedCount) }
-                } catch { issue("Impossibile leggere \(path): \(error.localizedDescription)") }
+                    do {
+                        if kind == S_IFDIR {
+                            // Package metadata is only needed for directories.
+                            // SF_DATALESS above is the kernel's placeholder flag.
+                            let value = try url.resourceValues(forKeys: [.isPackageKey])
+                            if value.isPackage == true { continue }
+                            let child = openat(dirfd(stream), name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                            guard child >= 0 else {
+                                issue("Impossibile aprire \(path): \(String(cString: strerror(errno)))"); continue
+                            }
+                            var opened = stat()
+                            guard fstat(child, &opened) == 0, opened.st_ino == state.st_ino,
+                                  opened.st_dev == state.st_dev, opened.st_flags & UInt32(SF_DATALESS) == 0 else {
+                                Darwin.close(child); issue("Cartella cambiata, ignorata: \(path)"); continue
+                            }
+                            walk(url, descriptor: child)
+                            continue
+                        }
+                        guard kind == S_IFREG, visited.insert(path).inserted else { continue }
+                        let ext = url.pathExtension.lowercased()
+                        var category = "largest"
+                        if root.lastPathComponent == "Downloads" || path.contains("/Downloads/") { category = "downloads" }
+                        if installerExtensions.contains(ext) { category = "installers" }
+                        if isScreenshot(url) { category = "screenshots" }
+                        let birth = Date(timeIntervalSince1970: Double(state.st_birthtimespec.tv_sec) + Double(state.st_birthtimespec.tv_nsec) / 1_000_000_000)
+                        files.append(FileEntry(id: path, url: url, name: name, size: Int64(state.st_size),
+                                               modified: modificationDate(state), created: birth, category: category,
+                                               snapshotDevice: UInt64(UInt32(bitPattern: state.st_dev)), snapshotInode: UInt64(state.st_ino)))
+                        scannedCount += 1
+                        if scannedCount % 100 == 0 { progress(scannedCount) }
+                    } catch { issue("Impossibile leggere \(path): \(error.localizedDescription)") }
+                }
             }
+            let descriptor = openDirectoryWithoutSymlinks(root)
+            if descriptor >= 0 { walk(root, descriptor: descriptor) }
+            else { issue("Impossibile aprire \(path): \(String(cString: strerror(errno)))") }
         }
         progress(scannedCount)
+        let orderedFiles = files.sorted { $0.size == $1.size ? $0.id < $1.id : $0.size > $1.size }
+        inventory(orderedFiles)
         let candidates = files.filter { $0.size >= max(0, options.minDuplicateSize) }
         if options.findDuplicates && !cancelled() { phase("Confronto dei duplicati…") }
         var duplicates: [[FileEntry]] = []
@@ -180,7 +203,7 @@ final class Scanner {
         }.sorted { (left: [FileEntry], right: [FileEntry]) in left[0].name.localizedStandardCompare(right[0].name) == .orderedAscending }
         if options.findPhotoSeries && !cancelled() { phase("Lettura delle date delle foto…") }
         let photoSeries = cancelled() || !options.findPhotoSeries ? [] : makePhotoSeries(files, interval: max(0, options.photoSeriesInterval), cancelled: cancelled)
-        return ScanResult(files: files.sorted { $0.size == $1.size ? $0.id < $1.id : $0.size > $1.size },
+        return ScanResult(files: orderedFiles,
                           duplicateGroups: duplicates.sorted { $0[0].id < $1[0].id },
                           sameNameGroups: sameNames, photoSeriesGroups: photoSeries,
                           issues: issues, scannedCount: scannedCount)
@@ -188,12 +211,11 @@ final class Scanner {
 
     private func isScreenshot(_ url: URL) -> Bool {
         guard imageExtensions.contains(url.pathExtension.lowercased()) else { return false }
+        let name = url.lastPathComponent.lowercased()
+        if name.hasPrefix("screenshot") || name.hasPrefix("screen shot") || name.hasPrefix("schermata") || name.hasPrefix("istantanea schermo") { return true }
         if let metadata = MDItemCreateWithURL(kCFAllocatorDefault, url as CFURL),
            let value = MDItemCopyAttribute(metadata, "kMDItemIsScreenCapture" as CFString) as? Bool, value { return true }
-        // Filename matching is an explicit heuristic when Spotlight has no flag.
-        let name = url.lastPathComponent.lowercased()
-        return imageExtensions.contains(url.pathExtension.lowercased()) &&
-            (name.hasPrefix("screenshot") || name.hasPrefix("screen shot") || name.hasPrefix("schermata") || name.hasPrefix("istantanea schermo"))
+        return false
     }
 
     func verifiedDigest(_ file: FileEntry, cancelled: () -> Bool = { false }) throws -> String? {
@@ -256,6 +278,19 @@ final class Scanner {
 
     private func modificationDate(_ value: stat) -> Date {
         Date(timeIntervalSince1970: Double(value.st_mtimespec.tv_sec) + Double(value.st_mtimespec.tv_nsec) / 1_000_000_000)
+    }
+
+    private func openDirectoryWithoutSymlinks(_ url: URL) -> Int32 {
+        var directory = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { return -1 }
+        for component in url.standardizedFileURL.pathComponents where component != "/" {
+            let next = openat(directory, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            let failure = errno
+            Darwin.close(directory)
+            guard next >= 0 else { errno = failure; return -1 }
+            directory = next
+        }
+        return directory
     }
 
     private func openWithoutSymlinks(_ url: URL) -> Int32 {

@@ -79,3 +79,7 @@ file-space estimate. Tooltips explain overlap; categories must not be summed.
 
 File result rows use native type icons from a shared bounded cache. Navigation
 reuses Model-owned derived lists and totals; changes to scan data invalidate them.
+
+The brand icon is also used in the macOS menu bar and explicitly in the Dock.
+The menu offers Open/Quit; closing the window keeps the app and its model alive.
+Ordinary inventory appears before derived content analysis; pending cards say In analisi.

@@ -164,6 +164,14 @@ final class CancelFlag: @unchecked Sendable {
                 DispatchQueue.main.async { self?.scanned = count }
             }, phase: { phase in
                 DispatchQueue.main.async { self?.status = phase }
+            }, inventory: { files in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.result = ScanResult(files: files, duplicateGroups: [], sameNameGroups: [], photoSeriesGroups: [], issues: [], scannedCount: files.count)
+                    self.junk = []
+                    self.hasScanned = true
+                    self.didScanJunk = false
+                }
             })
             let beganJunk = junkEnabled && !flag.cancelled
             let cacheResult = beganJunk ? JunkScanner.scan(exclusions: options.exclusions, includeContainers: containersEnabled, cancelled: { flag.cancelled }) : ([], [])
@@ -205,6 +213,7 @@ final class CancelFlag: @unchecked Sendable {
         guard ![.overview, .applications, .history, .settings].contains(category) else { return nil }
         guard enabledCategories.contains(category.rawValue) else { return "Off" }
         guard hasScanned else { return busy && !isRemoving ? "…" : "—" }
+        if busy && !isRemoving && [.duplicates, .names, .photos, .caches, .browsers, .logs].contains(category) { return "…" }
         guard ![.caches, .browsers, .logs].contains(category) || didScanJunk else { return "—" }
         if let cached = spaceCache[category] { return cached }
         let bytes: Int64
@@ -466,7 +475,7 @@ final class CancelFlag: @unchecked Sendable {
 }
 
 struct ContentView: View {
-    @StateObject var m = Model()
+    @ObservedObject var m: Model
     var body: some View {
         HStack(spacing: 0) {
             sidebar.frame(width: 235)
@@ -487,7 +496,7 @@ struct ContentView: View {
                     if m.busy { ProgressView().controlSize(.small); Text(m.isRemoving ? m.status : "\(m.scanned) file esaminati") }
                     else { Text(m.status).lineLimit(2) }
                     Spacer()
-                    Text("MacSweep · 0.1.4").foregroundStyle(.secondary)
+                    Text("MacSweep · 0.1.5").foregroundStyle(.secondary)
                 }.font(.caption).padding(.horizontal, 22).frame(height: 48)
             }.background(Theme.panel)
         }
@@ -543,7 +552,7 @@ struct ContentView: View {
                             VStack(alignment: .leading, spacing: 14) {
                                 HStack { Image(systemName: category.icon).font(.title2).foregroundStyle(Theme.accent); Spacer(); Image(systemName: "arrow.up.right").foregroundStyle(.secondary) }
                                 Text(category.title).font(.headline)
-                                Text(!m.enabledCategories.contains(category.rawValue) ? "Disattivata" : !m.hasScanned ? "Da esaminare" : [.caches, .browsers, .logs].contains(category) && !m.didScanJunk ? "Non esaminata" : Model.bytes(m.files(for: category).reduce(0) { $0 + $1.size })).font(.system(size: 25, weight: .medium, design: .rounded))
+                                Text(!m.enabledCategories.contains(category.rawValue) ? "Disattivata" : m.busy && !m.isRemoving && [Section.duplicates, .names, .photos, .caches, .browsers, .logs].contains(category) ? "In analisi" : !m.hasScanned ? "Da esaminare" : [.caches, .browsers, .logs].contains(category) && !m.didScanJunk ? "Non esaminata" : Model.bytes(m.files(for: category).reduce(0) { $0 + $1.size })).font(.system(size: 25, weight: .medium, design: .rounded))
                                 Text("\(m.files(for: category).count) file").font(.caption).foregroundStyle(.secondary)
                             }.padding(20).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()).background(Theme.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))
                         }.buttonStyle(.plain)
@@ -708,7 +717,7 @@ struct ContentView: View {
 }
 
 struct BrandMark: View {
-    private static let image: NSImage? = {
+    static let image: NSImage? = {
         #if SWIFT_PACKAGE
         let url = Bundle.module.url(forResource: "BrandIcon", withExtension: "png", subdirectory: "Resources")
         #else
@@ -775,14 +784,44 @@ struct NavigationSectionButton: View {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) { NSApp.activate(ignoringOtherApps: true) }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let image = NSImage(contentsOf: icon) {
+            NSApp.applicationIconImage = image
+        } else if let image = BrandMark.image {
+            NSApp.applicationIconImage = image
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
+
+struct MenuBarControls: View {
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        Button("Apri MacSweep") {
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Divider()
+        Button("Esci da MacSweep") { NSApp.terminate(nil) }.keyboardShortcut("q")
+    }
 }
 
 @main struct MacSweepApp: App {
+    @StateObject private var model = Model()
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene {
-        WindowGroup("MacSweep") { ContentView() }.defaultSize(width: 1180, height: 780)
+        WindowGroup("MacSweep", id: "main") { ContentView(m: model) }.defaultSize(width: 1180, height: 780)
             .commands { CommandGroup(replacing: .newItem) {} }
+        MenuBarExtra {
+            MenuBarControls()
+        } label: {
+            if let image = BrandMark.image {
+                Image(nsImage: image).resizable().scaledToFit().frame(width: 18, height: 18)
+                    .accessibilityLabel("MacSweep")
+            } else {
+                Image(systemName: "paintbrush.pointed.fill").accessibilityLabel("MacSweep")
+            }
+        }
     }
 }

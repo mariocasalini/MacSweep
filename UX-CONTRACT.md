@@ -56,3 +56,8 @@ file-space estimate. Tooltips explain overlap; categories must not be summed.
 Large duplicate candidates use a rejecting-only sample prefilter; full SHA-256 remains the equality authority. Phase feedback distinguishes inventory, comparison and photo analysis.
 
 Navigation performance: Model owns cached category inventories, formatted space badges, per-section search/order results and selected entries. Result, junk, download-root and enabled-category mutations invalidate all derived data. Query/order and selection-first ordering use explicit cache keys; page changes reuse the ordered collection. Empty selection returns immediately. File list icons use a bounded shared file-type icon cache and do not query each file path during rendering.
+
+Scan lifecycle: publish ordinary inventory before derived comparisons complete.
+Busy state still blocks mutations; derived totals remain pending until complete.
+App owns Model across window closure. The macOS menu can reopen the main window
+or quit explicitly. No automatic login item is configured.

@@ -175,6 +175,18 @@ struct ScannerTests {
             return comparisonChecks > 4
         }, phase: { if $0 == "Confronto dei duplicati…" { comparisonStarted = true } })
         expect(stoppedSample.files.count == 4 && stoppedSample.duplicateGroups.isEmpty, "Cancellation during sampled comparison keeps inventory without incomplete groups")
+        var earlyFiles: [FileEntry] = []
+        var inventoryWasPublished = false
+        var comparingAfterInventory = false
+        let staged = scanner.scan(options: ScanOptions(roots: [sampledRoot]), phase: {
+            if $0 == "Confronto dei duplicati…" { comparingAfterInventory = inventoryWasPublished }
+        }, inventory: { earlyFiles = $0; inventoryWasPublished = true })
+        expect(comparingAfterInventory && earlyFiles.map(\.id) == staged.files.map(\.id), "Inventory is published before content analysis with the same ordered files")
+        let unicode = sampledRoot.appendingPathComponent("Cartella è 日本語")
+        try manager.createDirectory(at: unicode, withIntermediateDirectories: true)
+        try Data("unicode".utf8).write(to: unicode.appendingPathComponent("file è 日本語.txt"))
+        let nested = scanner.scan(options: ScanOptions(roots: [sampledRoot]))
+        expect(nested.files.count == 5 && nested.files.contains { $0.name == "file è 日本語.txt" }, "Descriptor traversal preserves nested Unicode filenames")
         print("Scanner: \(assertionCount) fixture checks passed")
     }
 
