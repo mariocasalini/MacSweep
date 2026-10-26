@@ -32,8 +32,7 @@ Changing category clears selection, search and page. Local search is immediate
 and clears selection; clear button exists. No URL state for local private paths.
 Scan is read-only, cancellable; partial findings and errors remain visible.
 Mutations disabled while scanning. A canceled scan is explicitly partial.
-Settings persist for next scan. Cache access opt-in for each launch; sandbox
-container cache/log discovery has a separate opt-in. Disabling duplicate/name/
+Settings persist for next scan. Read-only user cache/log inventory is included in explicit scans; a dedicated cache scan is available without user-folder analysis. Nothing scans at launch. Sandbox container cache/log discovery retains its separate opt-in. Disabling duplicate/name/
 photo categories skips their derived content analysis; inventory is shared.
 Duplicate extra-copy selection retains a deterministic path per group; review
 rejects selecting all copies within a duplicate group. Same-name files are not
@@ -61,3 +60,27 @@ Scan lifecycle: publish ordinary inventory before derived comparisons complete.
 Busy state still blocks mutations; derived totals remain pending until complete.
 App owns Model across window closure. The macOS menu can reopen the main window
 or quit explicitly. No automatic login item is configured.
+
+Trash journal: load legacy removal-history.json and replay removal-history.json.events.
+Each intent and outcome appends only its record; fsync still precedes every move
+and follows completion. New event-file creation also fsyncs its directory. Legacy
+snapshots remain unchanged. Corrupt/torn journals and write failures fail closed.
+No batching of durability or permanent deletion is introduced. Update progress
+at most about 10 times/second, publish history once on completion/cancellation.
+Cache/log removal passes only the current explicitly reviewed file capability.
+Regular-file removal skips workspace app enumeration; directory and owner guards remain.
+
+## Runtime-observed junk coverage, 0.2.0
+Overview scope tabs and category cards are navigation controls. Read-only cache
+scanning starts on the first explicit visit to File inutili or a cache/log section, and is independent of user-file scans. Refresh remains explicit; nothing scans at launch. Unknown totals display
+Non esaminata/—; cancelled scans are partial; access errors are visible.
+Chrome Default/Profile directories admit only GPUCache and Service Worker's
+CacheStorage/ScriptCache beyond the existing Library/Caches coverage. Do not
+walk Cookies, History, Login Data, Local Storage, IndexedDB or arbitrary support
+data. Spotify media and GeoServices map stores are excluded from standard junk.
+Review selects files only within the checked, enabled junk categories, enters
+the aggregate File inutili section and opens the existing path-by-path
+confirmation. Confirming remains necessary; no automatic deletion is added.
+The aggregate removal capability is limited to exactly those reviewed files.
+File-detail focus never selects a file for deletion. Search, ordering, full-row
+navigation, paging and duplicate keeper checks remain canonical.

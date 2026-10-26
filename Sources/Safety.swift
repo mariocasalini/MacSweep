@@ -137,33 +137,90 @@ enum RemovalPolicy {
     }
 }
 
+/// Append-only record updates: constant work per operation, with each intent
+/// and completion fsynced before continuing. The legacy snapshot is read-only.
+enum RemovalJournal {
+    static func eventsURL(for storage: URL) -> URL { storage.appendingPathExtension("events") }
+    static func load(from storage: URL) throws -> [RemovalRecord] {
+        let fm = FileManager.default
+        let events = eventsURL(for: storage)
+        guard !RemovalPolicy.hasSymlinkComponent(storage), !RemovalPolicy.hasSymlinkComponent(events) else { throw CocoaError(.fileReadNoPermission) }
+        var records = fm.fileExists(atPath: storage.path) ? try JSONDecoder().decode([RemovalRecord].self, from: Data(contentsOf: storage)) : []
+        var indices: [UUID: Int] = [:]
+        for (index, record) in records.enumerated() {
+            guard indices.updateValue(index, forKey: record.id) == nil else { throw CocoaError(.fileReadCorruptFile) }
+        }
+        if fm.fileExists(atPath: events.path) {
+            let data = try Data(contentsOf: events)
+            // A torn append is not silently ignored: subsequent moves fail closed.
+            guard data.isEmpty || data.last == 10 else { throw CocoaError(.fileReadCorruptFile) }
+            for row in data.split(separator: 10) {
+                let record = try JSONDecoder().decode(RemovalRecord.self, from: Data(row))
+                if let index = indices[record.id] { records[index] = record }
+                else { indices[record.id] = records.count; records.append(record) }
+            }
+        }
+        return records
+    }
+    static func append(_ record: RemovalRecord, to storage: URL) throws {
+        let fm = FileManager.default
+        let events = eventsURL(for: storage)
+        guard !RemovalPolicy.hasSymlinkComponent(storage), !RemovalPolicy.hasSymlinkComponent(events) else { throw CocoaError(.fileWriteNoPermission) }
+        let directory = storage.deletingLastPathComponent()
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let existed = fm.fileExists(atPath: events.path)
+        var data = try JSONEncoder().encode(record)
+        data.append(10)
+        let fd = Darwin.open(events.path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { Darwin.close(fd) }
+        var state = stat()
+        guard fstat(fd, &state) == 0, state.st_mode & S_IFMT == S_IFREG else { throw CocoaError(.fileWriteNoPermission) }
+        guard fchmod(fd, 0o600) == 0 else { throw CocoaError(.fileWriteNoPermission) }
+        try data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let count = Darwin.write(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                offset += count
+            }
+        }
+        guard fsync(fd) == 0 else { throw CocoaError(.fileWriteUnknown) }
+        if !existed {
+            let parent = Darwin.open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard parent >= 0 else { throw CocoaError(.fileWriteNoPermission) }
+            defer { Darwin.close(parent) }
+            guard fsync(parent) == 0 else { throw CocoaError(.fileWriteUnknown) }
+        }
+    }
+}
+
 @MainActor
 final class RemovalStore {
     private(set) var records: [RemovalRecord] = []
     private(set) var loadError: String?
     let storageURL: URL
+    private let trashOperation: (URL) throws -> URL?
 
-    init(storageURL: URL? = nil) {
+    init(storageURL: URL? = nil, trashOperation: ((URL) throws -> URL?)? = nil) {
+        self.trashOperation = trashOperation ?? { url in
+            var destination: NSURL?
+            try FileManager.default.trashItem(at: url, resultingItemURL: &destination)
+            return destination as URL?
+        }
         self.storageURL = storageURL ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MacSweep/removal-history.json")
-        guard FileManager.default.fileExists(atPath: self.storageURL.path) else { return }
-        do {
-            guard !RemovalPolicy.hasSymlinkComponent(self.storageURL) else { throw CocoaError(.fileReadNoPermission) }
-            records = try JSONDecoder().decode([RemovalRecord].self, from: Data(contentsOf: self.storageURL))
-        } catch { loadError = "Cronologia non leggibile. Nessun file verrà spostato: \(error.localizedDescription)" }
+        do { records = try RemovalJournal.load(from: self.storageURL) }
+        catch { loadError = "Cronologia non leggibile. Nessun file verrà spostato: \(error.localizedDescription)" }
     }
 
-    private func persist() throws {
+    private func persist(_ record: RemovalRecord) throws {
         if let loadError { throw NSError(domain: "MacSweep", code: 2, userInfo: [NSLocalizedDescriptionKey: loadError]) }
-        guard !RemovalPolicy.hasSymlinkComponent(storageURL) else { throw CocoaError(.fileWriteNoPermission) }
-        let directory = storageURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        try JSONEncoder().encode(records).write(to: storageURL, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: storageURL.path)
-        let handle = try FileHandle(forWritingTo: storageURL)
-        try handle.synchronize()
-        try handle.close()
-        let fd = Darwin.open(directory.path, O_RDONLY)
-        if fd >= 0 { defer { Darwin.close(fd) }; if fsync(fd) != 0 { throw CocoaError(.fileWriteUnknown) } }
+        do { try RemovalJournal.append(record, to: storageURL) }
+        catch {
+            loadError = "Cronologia non sincronizzata. Nessun altro file verrà spostato: \(error.localizedDescription)"
+            throw error
+        }
     }
 
     static func validationError(url: URL, allowedRoots: [URL], exactAllowed: [URL] = []) -> String? {
@@ -176,19 +233,25 @@ final class RemovalStore {
         var seen = Set<String>()
         for url in urls.map({ $0.standardizedFileURL }).sorted(by: { $0.path.count < $1.path.count }) {
             guard seen.insert(url.path).inserted else { continue }
+            if let loadError { errors.append(loadError); break }
             if let app = runningOwner(bundleIDs: requiredClosedBundleIDs, appURLs: requiredClosedAppURLs) {
                 errors.append("\(app): l’app è in esecuzione. Operazione interrotta; i file rimanenti non sono stati spostati.")
                 break
             }
             if let problem = Self.validationError(url: url, allowedRoots: allowedRoots, exactAllowed: exactAllowed) { errors.append("\(url.lastPathComponent): \(problem)"); continue }
-            let running = NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL }
-            if running.contains(where: { RemovalPolicy.contains($0, in: url) }) { errors.append("\(url.lastPathComponent): chiudi prima l’applicazione."); continue }
+            // A regular file cannot contain a running .app bundle. Query the
+            // workspace only for directory removals; owner checks above remain.
+            var kind = stat()
+            if lstat(url.path, &kind) == 0 && kind.st_mode & S_IFMT == S_IFDIR {
+                let running = NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL }
+                if running.contains(where: { RemovalPolicy.contains($0, in: url) }) { errors.append("\(url.lastPathComponent): chiudi prima l’applicazione."); continue }
+            }
             do {
                 let identity = try FileIdentity.read(url)
                 let record = RemovalRecord(id: UUID(), originalPath: url.path, trashedPath: nil, date: Date(), restored: false, error: "Operazione avviata; destinazione non ancora confermata.", identity: identity)
                 records.append(record)
                 let index = records.count - 1
-                do { try persist() } catch { records.removeLast(); throw error }
+                do { try persist(records[index]) } catch { records.removeLast(); throw error }
                 do {
                     guard Self.validationError(url: url, allowedRoots: allowedRoots, exactAllowed: exactAllowed) == nil, try FileIdentity.read(url) == identity else { throw CocoaError(.fileReadUnknown) }
                     // Recheck after journal I/O too: the owner can relaunch while the
@@ -196,16 +259,15 @@ final class RemovalStore {
                     // best-effort guard, not a lock preventing other app launches.
                     if let app = runningOwner(bundleIDs: requiredClosedBundleIDs, appURLs: requiredClosedAppURLs) {
                         records[index].error = "\(app): l’app è stata avviata. Il file non è stato spostato."
-                        try persist()
+                        try persist(records[index])
                         errors.append(records[index].error!)
                         break
                     }
-                    var destination: NSURL?
-                    try FileManager.default.trashItem(at: url, resultingItemURL: &destination)
+                    let destination = try trashOperation(url)
                     records[index].trashedPath = destination?.path
                     records[index].error = destination == nil ? "Spostato nel Cestino, ma percorso di ripristino non disponibile." : nil
                     if let dest = destination as URL? { records[index].identity = try FileIdentity.read(dest) }
-                    do { try persist() } catch {
+                    do { try persist(records[index]) } catch {
                         // In-memory destination is retained; no second move is attempted.
                         records[index].error = "Spostato nel Cestino; salvataggio della cronologia fallito. Percorso: \(destination?.path ?? "sconosciuto"). \(error.localizedDescription)"
                         errors.append(records[index].error!)
@@ -214,7 +276,7 @@ final class RemovalStore {
                     }
                 } catch {
                     records[index].error = error.localizedDescription
-                    try? persist()
+                    try? persist(records[index])
                     errors.append("\(url.lastPathComponent): \(error.localizedDescription)")
                 }
             } catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
@@ -241,18 +303,18 @@ final class RemovalStore {
         do {
             guard let identity = records[index].identity, try FileIdentity.read(source) == identity else { return "Il file nel Cestino è cambiato: ripristino rifiutato." }
             records[index].error = "Ripristino avviato; completamento non ancora confermato."
-            try persist()
+            try persist(records[index])
             try FileManager.default.moveItem(at: source, to: destination)
             records[index].restored = true
             records[index].error = nil
-            do { try persist() } catch {
+            do { try persist(records[index]) } catch {
                 loadError = "File ripristinato, ma cronologia non sincronizzata: \(error.localizedDescription)"
                 return loadError
             }
             return nil
         } catch {
             records[index].error = error.localizedDescription
-            try? persist()
+            try? persist(records[index])
             return error.localizedDescription
         }
     }

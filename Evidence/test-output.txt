@@ -12,6 +12,18 @@ PASS shared group container is protected
 PASS corrupt history fails closed
 PASS no deletion with corrupt history
 PASS file survives rejected operation
+PASS 200 tiny fixture files move exactly once
+PASS every move has destination and identity
+PASS legacy history is preserved byte-for-byte
+PASS legacy plus append journal reload without duplicated records
+PASS completed events supersede intent events
+PASS restore refuses occupied original path
+PASS restoration succeeds from replayed journal
+PASS restore completion survives reload
+PASS journal permissions are private
+PASS torn append fails closed
+PASS symlink journal is rejected
+PASS failed intent persistence never invokes move
 Safety tests complete; no real files were moved to Trash.
 PASS default user cache/log roots
 PASS containers excluded by default
@@ -33,4 +45,11 @@ PASS fixture stat available
 PASS snapshot size and stat mtime match
 PASS missing roots are not errors
 PASS all excluded fixture data remains untouched
+PASS verified Chrome profile cache suffixes included
+PASS Application Support caches classified as browser cache
+PASS cookies history logins local storage and unrelated support data excluded
+PASS browser roots do not duplicate files
+PASS Chrome support root exclusion honored
+PASS Spotify media and map stores excluded from standard cleanup
+PASS retained media and maps untouched
 Junk scanner tests complete; only generated fake-home fixtures were read.

@@ -90,3 +90,8 @@ under immediate user container directories. This does not copy or certify the
 original automatic deletion rules: every candidate still requires user selection
 and exact-path confirmation. No LocalStorage, Documents, arbitrary Data or
 Group Containers traversal is added. Twenty isolated fixture checks cover scope.
+
+## Later runtime evidence
+The 0.2.0 native UI investigation in cleaner-runtime-ui.md supersedes the earlier
+static-only limitation for the three observed Chrome support-cache suffixes.
+Scope remains an explicit allowlist; no arbitrary support data was added.

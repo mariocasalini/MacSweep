@@ -83,3 +83,22 @@ ripristino dei soli file generati dal progetto. Dettagli in VERIFICATION.md.
 L’app pronta e i sorgenti sono separati dagli strumenti di reverse engineering:
 la cartella work/tools può essere archiviata quando non serve più all’analisi,
 senza impedire l’uso di MacSweep. Non cancellarla se vuoi proseguire con Ghidra.
+
+La versione 0.1.6 conserva la cronologia precedente e registra i nuovi aggiornamenti
+in `removal-history.json.events`, accanto a `removal-history.json`. Conservare
+entrambi per mantenere tutta la cronologia; le versioni precedenti non leggono
+il nuovo registro. Ogni intento e ogni esito continuano a essere sincronizzati
+su disco singolarmente.
+
+## Panoramica e cache — 0.2.0
+La panoramica distingue File utente e File inutili. La prima apertura di File
+inutili (o di una categoria cache/log) avvia una scansione di sola lettura,
+senza aspettare l'analisi dei duplicati. I risultati si possono aggiornare con
+Aggiorna scansione cache. Le categorie spuntate vengono selezionate nella
+revisione; solo la successiva conferma sposta i file nel Cestino.
+
+Oltre a Library/Caches e Library/Logs, vengono cercate le sole cache GPUCache,
+Service Worker/CacheStorage e Service Worker/ScriptCache dei profili Chrome.
+Cookie, password, cronologia e Local Storage non vengono enumerati. Media
+Spotify e mappe GeoServices restano esclusi dalla pulizia standard. Gli avvisi
+segnalano permessi mancanti o risultati parziali; non equivalgono a zero byte.

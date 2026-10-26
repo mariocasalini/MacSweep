@@ -37,6 +37,50 @@ struct SafetyTests {
         check(store.loadError != nil, "corrupt history fails closed")
         check(!store.trash(urls: [file], allowedRoots: [allowed]).isEmpty, "no deletion with corrupt history")
         check(fm.fileExists(atPath: file.path), "file survives rejected operation")
+        let batch = root.appendingPathComponent("batch")
+        let fakeTrash = root.appendingPathComponent("fake-trash")
+        try fm.createDirectory(at: batch, withIntermediateDirectories: true)
+        try fm.createDirectory(at: fakeTrash, withIntermediateDirectories: true)
+        let paths = (0..<200).map { batch.appendingPathComponent("tiny-\($0).txt") }
+        for path in paths { try Data("small".utf8).write(to: path) }
+        let storage = root.appendingPathComponent("batch-history.json")
+        let legacy = RemovalRecord(id: UUID(), originalPath: "/fixture/legacy", trashedPath: nil, date: Date(), restored: false, error: "fixture", identity: nil)
+        let legacyBytes = try JSONEncoder().encode([legacy])
+        try legacyBytes.write(to: storage)
+        var moves = 0
+        let batching = RemovalStore(storageURL: storage, trashOperation: { source in
+            moves += 1
+            let dest = fakeTrash.appendingPathComponent(source.lastPathComponent)
+            try fm.moveItem(at: source, to: dest)
+            return dest
+        })
+        let failures = batching.trash(urls: paths, allowedRoots: [batch])
+        check(failures.isEmpty && moves == paths.count, "200 tiny fixture files move exactly once")
+        check(batching.records.count == 201 && batching.records.dropFirst().allSatisfy { $0.trashedPath != nil && $0.identity != nil }, "every move has destination and identity")
+        check(try! Data(contentsOf: storage) == legacyBytes, "legacy history is preserved byte-for-byte")
+        let reloaded = RemovalStore(storageURL: storage)
+        check(reloaded.loadError == nil && reloaded.records.count == 201, "legacy plus append journal reload without duplicated records")
+        check(reloaded.records.dropFirst().allSatisfy { $0.error == nil }, "completed events supersede intent events")
+        let first = reloaded.records[1]
+        try Data("occupant".utf8).write(to: URL(fileURLWithPath: first.originalPath))
+        check(reloaded.restore(first.id) != nil, "restore refuses occupied original path")
+        try fm.removeItem(atPath: first.originalPath)
+        check(reloaded.restore(first.id) == nil && fm.fileExists(atPath: first.originalPath), "restoration succeeds from replayed journal")
+        let restored = RemovalStore(storageURL: storage)
+        check(restored.records[1].restored, "restore completion survives reload")
+        let events = RemovalJournal.eventsURL(for: storage)
+        check((try! fm.attributesOfItem(atPath: events.path)[.posixPermissions] as! NSNumber).intValue == 0o600, "journal permissions are private")
+        let torn = root.appendingPathComponent("torn.json")
+        try Data("incomplete".utf8).write(to: RemovalJournal.eventsURL(for: torn))
+        check(RemovalStore(storageURL: torn).loadError != nil, "torn append fails closed")
+        let linkJournal = root.appendingPathComponent("linked.json")
+        try fm.createSymbolicLink(at: RemovalJournal.eventsURL(for: linkJournal), withDestinationURL: events)
+        check(RemovalStore(storageURL: linkJournal).loadError != nil, "symlink journal is rejected")
+        let badParent = root.appendingPathComponent("not-a-directory")
+        try Data("block".utf8).write(to: badParent)
+        var unexpectedMove = false
+        let unwritable = RemovalStore(storageURL: badParent.appendingPathComponent("history.json"), trashOperation: { _ in unexpectedMove = true; return nil })
+        check(!unwritable.trash(urls: [file], allowedRoots: [allowed]).isEmpty && !unexpectedMove && fm.fileExists(atPath: file.path), "failed intent persistence never invokes move")
         print("Safety tests complete; no real files were moved to Trash.")
     }
 }

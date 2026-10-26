@@ -1,8 +1,8 @@
 ---
 version: alpha
 colors:
-  background: "#0E1A2E"
-  panel: "#16253D"
+  background: "#051A38"
+  panel: "#132540"
   accent: "#54B0FA"
 typography:
   heading:
@@ -21,7 +21,7 @@ spacing:
   row: "12px"
 components:
   sidebar:
-    width: "235px"
+    width: "260px"
   list:
     pageSize: 150
 ---
@@ -41,11 +41,11 @@ values round its RGB channels. Semantic destructive controls use the native
 macOS destructive intent; focus, selection and contrast adapt to OS settings.
 
 ## Typography
-System SF font roles, 30pt overview heading, 24pt screen title, 13pt body and
+System SF font roles, 30pt overview heading, 18pt centered screen title, 13pt body and
 native caption roles. File sizes use tabular digits. No downloaded fonts.
 
 ## Layout
-235pt sidebar and content panel with stable 100pt header and 48pt status strip.
+260pt sidebar and content panel with stable 60pt header and 48pt status strip.
 Minimum 920×620pt. Lists own their scrolling, 150 results per page. Settings and
 overview scroll separately. Native List virtualizes installed application rows.
 
@@ -83,3 +83,15 @@ reuses Model-owned derived lists and totals; changes to scan data invalidate the
 The brand icon is also used in the macOS menu bar and explicitly in the Dock.
 The menu offers Open/Quit; closing the window keeps the app and its model alive.
 Ordinary inventory appears before derived content analysis; pending cards say In analisi.
+
+Bulk Trash progress is throttled to roughly 10 Hz to avoid excessive redraws;
+complete history becomes visible when the operation finishes or is interrupted.
+
+## Cleaner-App runtime comparison, 0.2.0
+Grounded in current native screenshots: segmented File utente / File inutili
+overview, seven colored SF Symbol navigation tiles in 3+4 rows, three junk
+category tiles with checkboxes and an explicit review action. File sections
+use a list/detail split with separate checkbox removal selection and native
+row focus. Native navy list surfaces replace platform-default backgrounds.
+MacSweep identity, extra management tools and explicit scan/error states remain.
+No proprietary Cleaner-App artwork or paid-tool gates are copied.

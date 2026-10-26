@@ -1,0 +1,1 @@
+PASS cache-only badges, aggregate scope, reviewed categories, busy guard, disabled categories and unknown state

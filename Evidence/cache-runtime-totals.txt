@@ -1,0 +1,4 @@
+caches: 4078 files; 163303881 bytes
+browsers: 17044 files; 872340887 bytes
+logs: 41 files; 156032 bytes
+issues: 10; elapsed: 1.618056058883667

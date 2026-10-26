@@ -5,17 +5,18 @@ import Darwin
 import UniformTypeIdentifiers
 
 enum Theme {
-    static let background = Color(red: 0.055, green: 0.10, blue: 0.18)
-    static let panel = Color(red: 0.085, green: 0.145, blue: 0.24)
+    static let background = Color(red: 0.018, green: 0.10, blue: 0.22)
+    static let panel = Color(red: 0.075, green: 0.145, blue: 0.25)
     static let accent = Color(red: 0.33, green: 0.69, blue: 0.98)
 }
 
 enum Section: String, CaseIterable, Identifiable {
-    case overview, largest, downloads, installers, screenshots, duplicates, names, photos, caches, browsers, logs, applications, history, settings
+    case overview, junk, largest, downloads, installers, screenshots, duplicates, names, photos, caches, browsers, logs, applications, history, settings
     var id: String { rawValue }
     var title: String {
         switch self {
         case .overview: return "Panoramica"
+        case .junk: return "File inutili"
         case .largest: return "I file più grandi"
         case .downloads: return "Download"
         case .installers: return "File di installazione"
@@ -34,6 +35,7 @@ enum Section: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .overview: return "rectangle.grid.2x2"
+        case .junk: return "trash"
         case .largest: return "externaldrive"
         case .downloads: return "arrow.down.to.line"
         case .installers: return "shippingbox"
@@ -70,15 +72,19 @@ final class CancelFlag: @unchecked Sendable {
 
 @MainActor final class Model: ObservableObject {
     @Published var section: Section = .overview
+    @Published var overviewJunk = false
+    @Published var focusedFileID: String?
+    @Published var junkIssues: [String] = []
+    @Published var junkWasCancelled = false
     @Published var result = ScanResult(files: [], duplicateGroups: [], sameNameGroups: [], photoSeriesGroups: [], issues: [], scannedCount: 0) { didSet { invalidateInventory() } }
     @Published var junk: [FileEntry] = [] { didSet { invalidateInventory() } }
     @Published var roots: [URL] = []
     @Published var exclusions: [URL] = []
     @Published var downloadRoots: [URL] = [] { didSet { invalidateInventory() } }
     @Published var skipSmall = true
-    @Published var includeJunk = false
+    @Published var includeJunk = true
     @Published var includeContainerJunk = false
-    @Published var enabledCategories = Set(Section.allCases.filter { ![.overview, .applications, .history, .settings].contains($0) }.map(\.rawValue)) { didSet { invalidateInventory() } }
+    @Published var enabledCategories = Set(Section.allCases.filter { ![.overview, .junk, .applications, .history, .settings].contains($0) }.map(\.rawValue)) { didSet { invalidateInventory() } }
     @Published var busy = false
     @Published var scanned = 0
     @Published var hasScanned = false
@@ -121,7 +127,7 @@ final class CancelFlag: @unchecked Sendable {
         downloadRoots = (defaults.array(forKey: "downloadRoots") as? [String] ?? []).map { URL(fileURLWithPath: $0) }
         if defaults.object(forKey: "skipSmall") != nil { skipSmall = defaults.bool(forKey: "skipSmall") }
         if let saved = defaults.array(forKey: "enabledCategories") as? [String] { enabledCategories = Set(saved) }
-        // Cache access is opt-in for each launch; no scan runs on application startup.
+        // Read-only cache inventory is included in explicit scans. Nothing runs at startup.
         store = RemovalStore()
         history = store.records
         apps = ApplicationInventory.list()
@@ -180,12 +186,37 @@ final class CancelFlag: @unchecked Sendable {
                 self.result = found; self.result.issues += cacheResult.1; self.junk = cacheResult.0
                 self.scanned = found.scannedCount + cacheResult.0.count; self.busy = false; self.hasScanned = true
                 self.didScanJunk = beganJunk
+                self.junkIssues = cacheResult.1
+                self.junkWasCancelled = flag.cancelled && beganJunk
                 self.status = flag.cancelled ? "Scansione interrotta. Risultati parziali: \(self.scanned) file." : "Scansione completata: \(found.files.count) file utente, \(cacheResult.0.count) cache/log · \(self.result.issues.count) avvisi."
                 self.page = 0
             }
         }
     }
+    func scanJunk() {
+        guard !busy else { return }
+        busy = true; selected = []; scanned = 0; cancelFlag = CancelFlag()
+        status = "Scansione cache e log…"
+        let flag = cancelFlag, excluded = exclusions, containers = includeContainerJunk
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let found = JunkScanner.scan(exclusions: excluded, includeContainers: containers, cancelled: { flag.cancelled })
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.junk = found.0; self.junkIssues = found.1
+                self.junkWasCancelled = flag.cancelled; self.didScanJunk = true
+                self.busy = false; self.scanned = found.0.count
+                self.status = flag.cancelled ? "Scansione cache interrotta: risultati parziali." : "Cache e log: \(found.0.count) file · \(found.1.count) avvisi. Nessun file rimosso."
+            }
+        }
+    }
+    func reviewJunk(_ categories: Set<Section>) {
+        guard !busy, didScanJunk else { return }
+        open(.junk)
+        selected = Set(files(for: .junk).filter { categories.contains(Section(rawValue: $0.category) ?? .overview) }.map(\.id))
+        prepareRemoval()
+    }
     func files(for category: Section) -> [FileEntry] {
+        if category == .junk { return junk.filter { enabledCategories.contains($0.category) } }
         guard enabledCategories.contains(category.rawValue) else { return [] }
         if let cached = categoryCache[category] { return cached }
         let entries = uncachedFiles(for: category)
@@ -210,9 +241,10 @@ final class CancelFlag: @unchecked Sendable {
     }
     /// Candidate sizes are independent of search/selection; categories overlap.
     func sidebarSpace(for category: Section) -> String? {
-        guard ![.overview, .applications, .history, .settings].contains(category) else { return nil }
+        guard ![.overview, .junk, .applications, .history, .settings].contains(category) else { return nil }
         guard enabledCategories.contains(category.rawValue) else { return "Off" }
-        guard hasScanned else { return busy && !isRemoving ? "…" : "—" }
+        let isJunk = [.caches, .browsers, .logs].contains(category)
+        guard isJunk ? didScanJunk : hasScanned else { return busy && !isRemoving ? "…" : "—" }
         if busy && !isRemoving && [.duplicates, .names, .photos, .caches, .browsers, .logs].contains(category) { return "…" }
         guard ![.caches, .browsers, .logs].contains(category) || didScanJunk else { return "—" }
         if let cached = spaceCache[category] { return cached }
@@ -235,10 +267,10 @@ final class CancelFlag: @unchecked Sendable {
         return text
     }
     func sidebarSpaceHelp(for category: Section) -> String {
-        if [.overview, .applications, .history, .settings].contains(category) { return category.title }
+        if [.overview, .junk, .applications, .history, .settings].contains(category) { return category.title }
         if !enabledCategories.contains(category.rawValue) { return "Categoria disattivata nelle impostazioni." }
-        if !hasScanned { return "Spazio disponibile dopo la scansione." }
-        if [.caches, .browsers, .logs].contains(category) && !didScanJunk { return "Categoria non esaminata: abilita la pulizia e ripeti la scansione." }
+        if !hasScanned && ![.caches, .browsers, .logs].contains(category) { return "Spazio disponibile dopo la scansione." }
+        if [.caches, .browsers, .logs].contains(category) && !didScanJunk { return "Categoria non esaminata: avvia Scansiona cache e log dalla panoramica File inutili." }
         return category == .duplicates
             ? "Spazio potenzialmente recuperabile eliminando le copie extra e conservando una copia per gruppo. Le categorie non si sommano."
             : "Dimensione dei file da esaminare: scegli quali rimuovere. Le categorie possono sovrapporsi e non si sommano."
@@ -274,8 +306,9 @@ final class CancelFlag: @unchecked Sendable {
         return entries
     }
     func open(_ category: Section) {
-        section = category; selected = []; query = ""; page = 0
+        section = category; selected = []; query = ""; page = 0; focusedFileID = nil
         if category == .photos { sort = "capture" } else if sort == "capture" { sort = "size" }
+        if [.caches, .browsers, .logs].contains(category), !didScanJunk, !busy { scanJunk() }
     }
     func selectExtraCopies() {
         let visibleIDs = Set(filtered.map(\.id))
@@ -299,7 +332,7 @@ final class CancelFlag: @unchecked Sendable {
         let entries = pendingEntries
         let category = section
         let allowedRoots = roots + downloadRoots
-        let exactAllowed = [.caches, .browsers, .logs].contains(category) ? requests : []
+        let exactAllowed = [.junk, .caches, .browsers, .logs].contains(category) ? requests : []
         let removing = Set(requests.map(\.path))
         let groups = category == .duplicates ? result.duplicateGroups.filter { group in group.contains { removing.contains($0.id) } } : []
         let previousRecordIDs = Set(store.records.map(\.id))
@@ -325,6 +358,7 @@ final class CancelFlag: @unchecked Sendable {
                 return
             }
             var errors: [String] = []
+            var lastProgress = Date.distantPast
             for (index, url) in requests.enumerated() {
                 // Let the interface render progress and accept cancellation between
                 // individual, durably journaled Trash moves.
@@ -343,13 +377,15 @@ final class CancelFlag: @unchecked Sendable {
                     break
                 }
                 if flag.cancelled { break }
-                status = "Spostamento nel Cestino: \(index + 1) di \(requests.count)…"
+                if Date().timeIntervalSince(lastProgress) >= 0.1 {
+                    status = "Spostamento nel Cestino: \(index + 1) di \(requests.count)…"
+                    scanned = index + 1
+                    lastProgress = Date()
+                }
                 // These immediate metadata checks bound staleness after preflight,
                 // but do not lock files against concurrent writers. The store also
                 // rechecks path/identity before each Foundation Trash operation.
-                errors += store.trash(urls: [url], allowedRoots: allowedRoots, exactAllowed: exactAllowed)
-                scanned = index + 1
-                history = store.records
+                errors += store.trash(urls: [url], allowedRoots: allowedRoots, exactAllowed: exactAllowed.isEmpty ? [] : [url])
                 if store.loadError != nil { break }
             }
             let moved = Set(store.records.filter { !previousRecordIDs.contains($0.id) && removing.contains($0.originalPath) && $0.trashedPath != nil && !$0.restored }.map(\.originalPath))
@@ -358,6 +394,7 @@ final class CancelFlag: @unchecked Sendable {
             result.duplicateGroups = result.duplicateGroups.map { $0.filter { !moved.contains($0.id) } }.filter { $0.count > 1 }
             result.sameNameGroups = result.sameNameGroups.map { $0.filter { !moved.contains($0.id) } }.filter { $0.count > 1 }
             result.photoSeriesGroups = result.photoSeriesGroups.map { $0.filter { !moved.contains($0.id) } }.filter { $0.count > 1 }
+            scanned = store.records.filter { !previousRecordIDs.contains($0.id) }.count
             history = store.records
             selected = []; pending = []; pendingEntries = [:]; page = 0
             let removalSummary = moved.count == 1 ? "1 elemento spostato nel Cestino." : "\(moved.count) elementi spostati nel Cestino."
@@ -476,9 +513,13 @@ final class CancelFlag: @unchecked Sendable {
 
 struct ContentView: View {
     @ObservedObject var m: Model
+    @State private var junkCategories: Set<Section> = [.logs, .caches, .browsers]
+    private var canReviewJunk: Bool {
+        !m.busy && m.didScanJunk && m.junk.contains { junkCategories.contains(Section(rawValue: $0.category) ?? .overview) && m.enabledCategories.contains($0.category) }
+    }
     var body: some View {
         HStack(spacing: 0) {
-            sidebar.frame(width: 235)
+            sidebar.frame(width: 260)
             VStack(spacing: 0) {
                 header
                 Divider()
@@ -493,10 +534,10 @@ struct ContentView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 HStack {
-                    if m.busy { ProgressView().controlSize(.small); Text(m.isRemoving ? m.status : "\(m.scanned) file esaminati") }
+                    if m.busy { ProgressView().controlSize(.small); Text(m.status).lineLimit(1) }
                     else { Text(m.status).lineLimit(2) }
                     Spacer()
-                    Text("MacSweep · 0.1.5").foregroundStyle(.secondary)
+                    Text("MacSweep · 0.2.0").foregroundStyle(.secondary)
                 }.font(.caption).padding(.horizontal, 22).frame(height: 48)
             }.background(Theme.panel)
         }
@@ -514,7 +555,8 @@ struct ContentView: View {
             Text("ESAMINA. SCEGLI. LIBERA.").font(.system(size: 10, weight: .semibold, design: .monospaced)).foregroundStyle(.secondary).padding(.horizontal, 18)
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    sideGroup("FILE UTENTE", [.overview, .largest, .downloads, .installers, .screenshots, .duplicates, .names, .photos])
+                    sideGroup("FILE UTENTE", [.overview, .largest, .downloads, .installers])
+                    sideGroup("ALTRE CATEGORIE", [.screenshots, .duplicates, .names, .photos])
                     sideGroup("PULIZIA", [.caches, .browsers, .logs])
                     sideGroup("GESTIONE", [.applications, .history, .settings])
                 }.padding(.horizontal, 10)
@@ -531,45 +573,113 @@ struct ContentView: View {
         }
     }
     var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) { Text(m.section.title).font(.system(size: 24, weight: .semibold)); Text(m.busy ? m.isRemoving ? "Rimozione dei soli file confermati, con cronologia di ripristino." : "La scansione legge i file, senza modificarli." : "Il controllo resta nelle tue mani.").font(.caption).foregroundStyle(.secondary) }
-            Spacer()
-            if m.busy { Button("Interrompi") { m.cancelFlag.cancel() } }
-            else { Button { m.chooseFolders() } label: { Label("Cartelle", systemImage: "folder.badge.plus") }; Button("Scansiona") { m.scan() }.buttonStyle(.borderedProminent) }
-        }.padding(22).frame(height: 100)
+        ZStack {
+            Text(m.section.title).font(.system(size: 18, weight: .semibold)).lineLimit(1)
+            HStack {
+                if m.section != .overview { Button { m.open(.overview) } label: { Image(systemName: "chevron.left") }.help("Torna alla panoramica").accessibilityLabel("Torna alla panoramica") }
+                Spacer()
+                if m.busy { Button("Interrompi") { m.cancelFlag.cancel() } }
+                else {
+                    Button { m.chooseFolders() } label: { Label("Cartelle", systemImage: "folder.badge.plus") }
+                    Button("Scansiona") {
+                        if m.section == .overview && m.overviewJunk || [.junk, .caches, .browsers, .logs].contains(m.section) { m.scanJunk() }
+                        else if m.roots.isEmpty { m.chooseFolders(); if !m.roots.isEmpty { m.scan() } }
+                        else { m.scan() }
+                    }.buttonStyle(.borderedProminent)
+                }
+            }
+        }.padding(.horizontal, 22).frame(height: 60)
     }
     var overview: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(m.hasScanned ? "Lo spazio, file per file." : "Fai spazio alle cose che contano.").font(.system(size: 30, weight: .semibold))
-                    Text(m.hasScanned ? "\(m.result.files.count) file individuati nelle cartelle scelte. Le categorie possono sovrapporsi: le dimensioni non si sommano." : "Aggiungi una cartella, esamina i risultati e scegli cosa spostare nel Cestino.").foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    if !m.hasScanned { Button("Scegli le cartelle da esaminare") { m.chooseFolders() }.padding(.top, 4) }
-                }.padding(.vertical, 12)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 14)], spacing: 14) {
-                    ForEach([Section.largest, .downloads, .installers, .screenshots, .duplicates, .names, .photos, .caches, .browsers, .logs]) { category in
-                        Button { m.open(category) } label: {
-                            VStack(alignment: .leading, spacing: 14) {
-                                HStack { Image(systemName: category.icon).font(.title2).foregroundStyle(Theme.accent); Spacer(); Image(systemName: "arrow.up.right").foregroundStyle(.secondary) }
-                                Text(category.title).font(.headline)
-                                Text(!m.enabledCategories.contains(category.rawValue) ? "Disattivata" : m.busy && !m.isRemoving && [Section.duplicates, .names, .photos, .caches, .browsers, .logs].contains(category) ? "In analisi" : !m.hasScanned ? "Da esaminare" : [.caches, .browsers, .logs].contains(category) && !m.didScanJunk ? "Non esaminata" : Model.bytes(m.files(for: category).reduce(0) { $0 + $1.size })).font(.system(size: 25, weight: .medium, design: .rounded))
-                                Text("\(m.files(for: category).count) file").font(.caption).foregroundStyle(.secondary)
-                            }.padding(20).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle()).background(Theme.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 12))
-                        }.buttonStyle(.plain)
-                    }
+            VStack(spacing: m.overviewJunk ? 22 : 30) {
+                HStack(spacing: 4) {
+                    overviewTab("File utente", icon: "square.grid.2x2.fill", active: !m.overviewJunk,
+                                size: m.hasScanned ? Model.bytes(m.result.files.reduce(0) { $0 + $1.size }) : "—") { m.overviewJunk = false }
+                    overviewTab("File inutili", icon: "trash.fill", active: m.overviewJunk,
+                                size: m.didScanJunk ? Model.bytes(m.files(for: .junk).reduce(0) { $0 + $1.size }) : "—") { m.overviewJunk = true; if !m.didScanJunk && !m.busy { m.scanJunk() } }
+                }.padding(4).background(Theme.background.opacity(0.4), in: Capsule()).overlay(Capsule().stroke(Color.white.opacity(0.13)))
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(spacing: 7) {
+                    Text(m.overviewJunk ? "Rimuovi file inutili" : "Rimuovi file utente").font(.system(size: 23, weight: .semibold))
+                    Text(m.overviewJunk ? "Esamina cache e log, poi scegli cosa spostare nel Cestino" : "Verifica e rimuovi i file dalla categoria appropriata").foregroundStyle(.secondary)
                 }
-                if !m.result.issues.isEmpty { DisclosureGroup("\(m.result.issues.count) avvisi di scansione") { ForEach(Array(m.result.issues.enumerated()), id: \.offset) { _, text in Text(text).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) } } }
-            }.padding(26)
+                if m.overviewJunk {
+                    HStack(alignment: .top, spacing: 24) {
+                        ForEach([Section.logs, .caches, .browsers]) { category in
+                            VStack(spacing: 15) {
+                                Button { m.open(category) } label: { CategoryArtwork(category: category).frame(width: 124, height: 124) }.buttonStyle(.plain).help("Esamina \(category.title)")
+                                Toggle(category.title, isOn: Binding(get: { junkCategories.contains(category) }, set: { if $0 { junkCategories.insert(category) } else { junkCategories.remove(category) } })).toggleStyle(.checkbox).font(.system(size: 14))
+                                Text(junkSize(category)).font(.system(size: 17)).monospacedDigit()
+                                Button("Esamina file") { m.open(category) }.font(.caption)
+                            }.frame(maxWidth: .infinity)
+                        }
+                    }.padding(.vertical, 12)
+                    if !m.didScanJunk {
+                        Text("Le cache non sono ancora state esaminate. La scansione legge solo i file e segnala i percorsi non accessibili.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    VStack(spacing: 12) {
+                        if m.didScanJunk {
+                            Button { m.reviewJunk(junkCategories) } label: {
+                                Text("Rivedi e pulisci").font(.system(size: 16, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 14)
+                                    .background(Color.blue.opacity(0.8), in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.white).contentShape(Rectangle())
+                            }.buttonStyle(.plain).frame(maxWidth: 420)
+                                .disabled(!canReviewJunk).opacity(canReviewJunk ? 1 : 0.45)
+                            Button("Aggiorna scansione cache") { m.scanJunk() }.disabled(m.busy)
+                        } else {
+                            Button { m.scanJunk() } label: {
+                                Text("Scansiona cache e log").font(.system(size: 16, weight: .medium)).frame(maxWidth: .infinity).padding(.vertical, 14)
+                                    .background(Color.blue.opacity(0.8), in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.white).contentShape(Rectangle())
+                            }.buttonStyle(.plain).frame(maxWidth: 420).disabled(m.busy).opacity(m.busy ? 0.45 : 1)
+                        }
+                    }
+                    Text("La revisione seleziona i file delle categorie spuntate. Nessuna rimozione prima della conferma.").font(.caption).foregroundStyle(.secondary)
+                    if m.junkWasCancelled { Label("Risultati parziali: scansione interrotta", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+                    if !m.junkIssues.isEmpty { scanWarnings(m.junkIssues, title: "Avvisi cache: \(m.junkIssues.count)") }
+                } else {
+                    HStack(spacing: 22) { ForEach([Section.largest, .downloads, .installers]) { overviewCategory($0) } }
+                    HStack(spacing: 18) { ForEach([Section.screenshots, .duplicates, .names, .photos]) { overviewCategory($0) } }
+                    if !m.hasScanned { Button("Scegli le cartelle da esaminare") { m.chooseFolders() } }
+                    Text("Le categorie possono sovrapporsi: le dimensioni non si sommano.").font(.caption).foregroundStyle(.secondary)
+                    if !m.result.issues.isEmpty { scanWarnings(m.result.issues, title: "Avvisi di scansione: \(m.result.issues.count)") }
+                }
+            }.padding(.horizontal, 32).padding(.vertical, m.overviewJunk ? 24 : 30).frame(maxWidth: 980).frame(maxWidth: .infinity)
         }
+    }
+    func overviewTab(_ title: String, icon: String, active: Bool, size: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) { Label(title, systemImage: icon); Text(size).fontWeight(.semibold).monospacedDigit() }
+                .padding(.horizontal, 18).padding(.vertical, 10).contentShape(Capsule())
+                .background(active ? Color.blue.opacity(0.65) : Color.clear, in: Capsule())
+        }.buttonStyle(.plain).accessibilityAddTraits(active ? .isSelected : [])
+    }
+    func overviewCategory(_ category: Section) -> some View {
+        Button { m.open(category) } label: {
+            VStack(spacing: 12) {
+                CategoryArtwork(category: category).frame(width: 100, height: 100)
+                Text(category.title).font(.system(size: 14)).lineLimit(2).multilineTextAlignment(.center)
+                Text(m.sidebarSpace(for: category) ?? "—").font(.system(size: 16)).monospacedDigit().foregroundStyle(.secondary)
+            }.frame(maxWidth: .infinity).padding(10).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+    func junkSize(_ category: Section) -> String {
+        if !m.enabledCategories.contains(category.rawValue) { return "Disattivata" }
+        if m.busy && !m.isRemoving { return "In analisi…" }
+        return m.didScanJunk ? Model.bytes(m.files(for: category).reduce(0) { $0 + $1.size }) : "Non esaminata"
+    }
+    func scanWarnings(_ warnings: [String], title: String) -> some View {
+        DisclosureGroup(title) {
+            ForEach(Array(warnings.enumerated()), id: \.offset) { _, text in Text(text).font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+        }.font(.caption).padding(12).background(Theme.background.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
     }
     var files: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(m.section.note).font(.caption).foregroundStyle(.secondary)
             if [.caches, .browsers, .logs].contains(m.section) && !m.didScanJunk {
-                HStack { Text("La scansione delle cache e dei log richiede una scelta esplicita.").font(.caption); Button("Abilita scansione") { m.includeJunk = true; m.scan() } }
+                HStack { Text("Questa categoria non è ancora stata esaminata.").font(.caption); Button("Scansiona cache e log") { m.scanJunk() }.disabled(m.busy) }
             }
             HStack {
-                TextField("Cerca per nome o percorso", text: $m.query).textFieldStyle(.roundedBorder).onChange(of: m.query) { _ in m.page = 0; m.selected = [] }
+                TextField("Cerca per nome o percorso", text: $m.query).textFieldStyle(.plain).padding(8).background(Theme.background.opacity(0.6), in: RoundedRectangle(cornerRadius: 7)).onChange(of: m.query) { _ in m.page = 0; m.selected = [] }
                 if !m.query.isEmpty { Button { m.query = "" } label: { Image(systemName: "xmark.circle.fill") }.help("Cancella ricerca").accessibilityLabel("Cancella ricerca") }
                 Picker("Ordina", selection: $m.sort) {
                     if m.section == .photos { Text("Data di scatto").tag("capture") }
@@ -590,7 +700,8 @@ struct ContentView: View {
             if m.filtered.isEmpty {
                 VStack(spacing: 14) { Image(systemName: m.busy ? "magnifyingglass" : "folder").font(.system(size: 36)).foregroundStyle(.secondary); Text(m.busy ? "Ricerca in corso…" : !m.enabledCategories.contains(m.section.rawValue) ? "Categoria disattivata nelle impostazioni" : m.hasScanned ? "Nessun risultato per questa categoria" : "Avvia una scansione per vedere i file"); Text("Le cartelle non accessibili sono indicate negli avvisi.").font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(m.visible) { file in
+                HStack(spacing: 0) {
+                List(m.visible, selection: $m.focusedFileID) { file in
                     HStack(spacing: 12) {
                         Toggle("Seleziona \(file.name)", isOn: Binding(get: { m.selected.contains(file.id) }, set: { if $0 { m.selected.insert(file.id) } else { m.selected.remove(file.id) } })).labelsHidden().toggleStyle(.checkbox).disabled(m.busy)
                         Image(nsImage: FileTypeIcons.image(for: file.url)).resizable().frame(width: 30, height: 30)
@@ -599,10 +710,8 @@ struct ContentView: View {
                             Text(file.url.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(file.url.path)
                         }
                         Spacer()
-                        VStack(alignment: .trailing, spacing: 4) { Text(Model.bytes(file.size)).monospacedDigit(); Text((m.section == .photos ? file.photoDate ?? file.modified : file.modified).formatted(date: .abbreviated, time: m.section == .photos ? .standard : .omitted)).font(.caption2).foregroundStyle(.secondary) }
-                        Button { Preview.shared.show(file.url) } label: { Image(systemName: "eye") }.help("Anteprima").accessibilityLabel("Anteprima \(file.name)")
-                        Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Image(systemName: "folder") }.help("Mostra nel Finder").accessibilityLabel("Mostra \(file.name) nel Finder")
-                    }.padding(.vertical, 5).accessibilityElement(children: .contain)
+                        Text(Model.bytes(file.size)).monospacedDigit().font(.caption)
+                    }.padding(.vertical, 7).tag(file.id).listRowBackground(Theme.background.opacity(0.4)).accessibilityElement(children: .contain)
                         .contextMenu {
                             Button("Anteprima") { Preview.shared.show(file.url) }
                             Button("Mostra nel Finder") { NSWorkspace.shared.activateFileViewerSelecting([file.url]) }
@@ -615,17 +724,42 @@ struct ContentView: View {
                                 Button("Deseleziona il gruppo") { m.selected.subtract(members.map(\.id)) }.disabled(m.busy)
                             }
                         }
-                }.listStyle(.inset)
+                }.listStyle(.inset).scrollContentBackground(.hidden).background(Theme.panel).frame(minWidth: 290)
+                Divider()
+                fileDetails.frame(minWidth: 210, maxWidth: 310)
+                }
             }
+            if [.junk, .caches, .browsers, .logs].contains(m.section), !m.junkIssues.isEmpty { scanWarnings(m.junkIssues, title: "Avvisi cache: \(m.junkIssues.count)") }
             HStack {
                 Button("Precedente") { m.page -= 1 }.disabled(m.page == 0)
                 Text("Pagina \(m.page + 1) di \(max(1, (m.filtered.count + m.perPage - 1) / m.perPage))").font(.caption)
                 Button("Successiva") { m.page += 1 }.disabled((m.page + 1) * m.perPage >= m.filtered.count)
                 Spacer()
                 Text("\(m.selectedFiles.count) \(m.selectedFiles.count == 1 ? "selezionato" : "selezionati") · \(Model.bytes(m.selectedFiles.reduce(0) { $0 + $1.size }))").font(.caption)
-                Button("Rivedi rimozione…") { m.prepareRemoval() }.disabled(m.selectedFiles.isEmpty || m.busy).buttonStyle(.borderedProminent)
+                Button("Rivedi per rimuovere") { m.prepareRemoval() }.disabled(m.selectedFiles.isEmpty || m.busy).buttonStyle(.borderedProminent).controlSize(.large)
             }
         }.padding(22)
+    }
+    var fileDetails: some View {
+        let file = m.visible.first { $0.id == m.focusedFileID } ?? m.visible.first
+        return ScrollView {
+            if let file {
+                VStack(alignment: .leading, spacing: 20) {
+                    Image(nsImage: FileTypeIcons.image(for: file.url)).resizable().scaledToFit().frame(width: 126, height: 150).frame(maxWidth: .infinity).padding(.top, 22)
+                    HStack(alignment: .top) { Text(file.name).font(.headline).textSelection(.enabled); Spacer(); Text(Model.bytes(file.size)).monospacedDigit() }
+                    Divider()
+                    detailLine("Tipo", file.url.pathExtension.isEmpty ? "File" : file.url.pathExtension.uppercased())
+                    detailLine("Creato", file.created.formatted(date: .abbreviated, time: .shortened))
+                    detailLine("Modificato", file.modified.formatted(date: .abbreviated, time: .shortened))
+                    if let group = file.groupID { detailLine("Gruppo", group) }
+                    Text(file.url.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    HStack { Button("Anteprima") { Preview.shared.show(file.url) }; Button("Nel Finder") { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } }
+                }.padding(18)
+            }
+        }
+    }
+    func detailLine(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) { HStack { Text(title).foregroundStyle(.secondary); Spacer(); Text(value).multilineTextAlignment(.trailing) }; Divider() }.font(.caption)
     }
     var settings: some View {
         ScrollView {
@@ -640,7 +774,7 @@ struct ContentView: View {
                 Text("Le modifiche valgono per la prossima scansione. File nascosti, pacchetti, collegamenti simbolici e file cloud non scaricati sono esclusi. La sezione I file più grandi mostra i file esaminati, ordinabili per dimensione.").font(.caption).foregroundStyle(.secondary)
                 Text("Categorie da analizzare e mostrare").font(.headline)
                 Text("Disattivare duplicati, nomi uguali o serie di foto evita la relativa analisi. L’inventario di base serve alle altre categorie.").font(.caption).foregroundStyle(.secondary)
-                ForEach(Section.allCases.filter { ![.overview, .applications, .history, .settings].contains($0) }) { c in
+                ForEach(Section.allCases.filter { ![.overview, .junk, .applications, .history, .settings].contains($0) }) { c in
                     Toggle(c.title, isOn: Binding(get: { m.enabledCategories.contains(c.rawValue) }, set: { if $0 { m.enabledCategories.insert(c.rawValue) } else { m.enabledCategories.remove(c.rawValue) }; m.selected = []; m.persist() }))
                 }
                 Text("Nessun accesso completo al disco viene richiesto automaticamente. Se macOS nega una cartella, il risultato lo segnala.").font(.caption).foregroundStyle(.secondary)
@@ -668,7 +802,7 @@ struct ContentView: View {
                     if app.isRunning { Text("In esecuzione").font(.caption) }
                     Button("Esamina…") { m.chooseApp(app) }.disabled(m.busy)
                 }.padding(.vertical, 6).accessibilityElement(children: .contain)
-            }.listStyle(.inset)
+            }.listStyle(.inset).scrollContentBackground(.hidden).background(Theme.panel)
         }.padding(22)
     }
     var history: some View {
@@ -734,6 +868,27 @@ struct BrandMark: View {
     }
 }
 
+struct CategoryArtwork: View {
+    let category: Section
+    var color: Color {
+        switch category {
+        case .largest: return .cyan
+        case .downloads, .browsers: return .blue
+        case .installers: return Color(red: 0.17, green: 0.48, blue: 0.95)
+        case .screenshots, .caches: return .orange
+        case .duplicates: return .pink
+        default: return .purple
+        }
+    }
+    var body: some View {
+        Image(systemName: category.icon).font(.system(size: 42, weight: .medium)).foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(LinearGradient(colors: [color.opacity(0.95), color.opacity(0.5)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22))
+            .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.25), lineWidth: 1))
+            .shadow(color: color.opacity(0.15), radius: 8, y: 3).accessibilityHidden(true)
+    }
+}
+
 @MainActor enum FileTypeIcons {
     private static let cache = NSCache<NSString, NSImage>()
     static func image(for url: URL) -> NSImage {
@@ -774,7 +929,7 @@ struct NavigationSectionButton: View {
                 .padding(.horizontal, 10).padding(.vertical, 9)
                 // The hit target includes the entire row, including clear space.
                 .contentShape(Rectangle())
-                .background(selected ? Theme.accent.opacity(0.22) : hovered ? Color.white.opacity(0.07) : Color.clear,
+                .background(selected ? Color.blue.opacity(0.48) : hovered ? Color.white.opacity(0.07) : Color.clear,
                             in: RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)

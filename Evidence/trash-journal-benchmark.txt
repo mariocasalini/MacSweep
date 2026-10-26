@@ -1,0 +1,2 @@
+Previous journal: 4.5075 seconds; 245525210 bytes encoded/written
+Append journal: 1.8421 seconds; 186680 bytes appended; replay verified
