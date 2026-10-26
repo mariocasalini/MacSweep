@@ -1,7 +1,7 @@
 {
   "artifact": "MacSweep.app.zip",
-  "sha256": "313484f962cb7fcdfed80b48406be9a889e3f6b2ac94af20ae18717b3f47a2e3",
-  "bytes": 401450,
+  "sha256": "b3fe1570950fa123e7d5ce320d3239056ed36622d9a8478c731d0ca8cbc9caf9",
+  "bytes": 2359528,
   "architecture": "arm64",
   "deploymentTarget": "macOS 13.0",
   "testedOS": "macOS 26.2",
@@ -10,5 +10,8 @@
   "scannerFixtureChecks": 27,
   "safetyFixtureChecks": 13,
   "junkFixtureChecks": 20,
-  "totalFixtureChecks": 60
+  "totalFixtureChecks": 60,
+  "version": "0.1.1",
+  "fixtureChecksNote": "60 checks from preceding functional build; not rerun for this icon and hit-area-only update",
+  "uiVerification": "Isolated native preview: whitespace clicks on Download and Duplicati sidebar rows, Panoramica row, and empty Download card corner all navigated correctly. New sidebar logo visually verified. Strict UI audit: 0 findings."
 }
