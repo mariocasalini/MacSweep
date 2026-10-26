@@ -1,0 +1,3 @@
+0.7292 seconds; 1066 files; exact duplicate pair only
+0.6142 seconds; 1066 files; exact duplicate pair only
+0.5903 seconds; 1066 files; exact duplicate pair only

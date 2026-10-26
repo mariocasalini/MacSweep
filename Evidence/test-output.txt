@@ -1,4 +1,4 @@
-Scanner: 27 fixture checks passed
+Scanner: 30 fixture checks passed
 PASS authorized descendant
 PASS reject scan root itself
 PASS path boundary rejects sibling prefix

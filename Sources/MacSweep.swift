@@ -70,15 +70,15 @@ final class CancelFlag: @unchecked Sendable {
 
 @MainActor final class Model: ObservableObject {
     @Published var section: Section = .overview
-    @Published var result = ScanResult(files: [], duplicateGroups: [], sameNameGroups: [], photoSeriesGroups: [], issues: [], scannedCount: 0)
-    @Published var junk: [FileEntry] = []
+    @Published var result = ScanResult(files: [], duplicateGroups: [], sameNameGroups: [], photoSeriesGroups: [], issues: [], scannedCount: 0) { didSet { invalidateInventory() } }
+    @Published var junk: [FileEntry] = [] { didSet { invalidateInventory() } }
     @Published var roots: [URL] = []
     @Published var exclusions: [URL] = []
-    @Published var downloadRoots: [URL] = []
+    @Published var downloadRoots: [URL] = [] { didSet { invalidateInventory() } }
     @Published var skipSmall = true
     @Published var includeJunk = false
     @Published var includeContainerJunk = false
-    @Published var enabledCategories = Set(Section.allCases.filter { ![.overview, .applications, .history, .settings].contains($0) }.map(\.rawValue))
+    @Published var enabledCategories = Set(Section.allCases.filter { ![.overview, .applications, .history, .settings].contains($0) }.map(\.rawValue)) { didSet { invalidateInventory() } }
     @Published var busy = false
     @Published var scanned = 0
     @Published var hasScanned = false
@@ -102,6 +102,16 @@ final class CancelFlag: @unchecked Sendable {
     var cancelFlag = CancelFlag()
     var pendingEntries: [String: FileEntry] = [:]
     var appIdentities: [String: FileIdentity] = [:]
+    private var categoryCache: [Section: [FileEntry]] = [:]
+    private var spaceCache: [Section: String] = [:]
+    private var filteredCache: [Section: (query: String, sort: String, selection: Set<String>, files: [FileEntry])] = [:]
+    private var selectionCache: (section: Section, ids: Set<String>, files: [FileEntry])?
+    private func invalidateInventory() {
+        categoryCache.removeAll()
+        spaceCache.removeAll()
+        filteredCache.removeAll()
+        selectionCache = nil
+    }
     let perPage = 150
 
     init() {
@@ -152,6 +162,8 @@ final class CancelFlag: @unchecked Sendable {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let found = Scanner().scan(options: options, cancelled: { flag.cancelled }, progress: { count in
                 DispatchQueue.main.async { self?.scanned = count }
+            }, phase: { phase in
+                DispatchQueue.main.async { self?.status = phase }
             })
             let beganJunk = junkEnabled && !flag.cancelled
             let cacheResult = beganJunk ? JunkScanner.scan(exclusions: options.exclusions, includeContainers: containersEnabled, cancelled: { flag.cancelled }) : ([], [])
@@ -167,6 +179,12 @@ final class CancelFlag: @unchecked Sendable {
     }
     func files(for category: Section) -> [FileEntry] {
         guard enabledCategories.contains(category.rawValue) else { return [] }
+        if let cached = categoryCache[category] { return cached }
+        let entries = uncachedFiles(for: category)
+        categoryCache[category] = entries
+        return entries
+    }
+    private func uncachedFiles(for category: Section) -> [FileEntry] {
         switch category {
         case .largest: return result.files
         case .downloads:
@@ -182,12 +200,49 @@ final class CancelFlag: @unchecked Sendable {
         default: return []
         }
     }
+    /// Candidate sizes are independent of search/selection; categories overlap.
+    func sidebarSpace(for category: Section) -> String? {
+        guard ![.overview, .applications, .history, .settings].contains(category) else { return nil }
+        guard enabledCategories.contains(category.rawValue) else { return "Off" }
+        guard hasScanned else { return busy && !isRemoving ? "…" : "—" }
+        guard ![.caches, .browsers, .logs].contains(category) || didScanJunk else { return "—" }
+        if let cached = spaceCache[category] { return cached }
+        let bytes: Int64
+        if category == .duplicates {
+            // Match extra-copy selection: always retain the first path per group.
+            bytes = result.duplicateGroups.reduce(0) { total, group in
+                total + group.sorted { $0.url.path < $1.url.path }.dropFirst().reduce(0) { $0 + $1.size }
+            }
+        } else {
+            bytes = files(for: category).reduce(0) { $0 + $1.size }
+        }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowedUnits = [.useMB, .useGB, .useTB]
+        formatter.includesActualByteCount = false
+        formatter.zeroPadsFractionDigits = false
+        let text = bytes == 0 ? "0 MB" : bytes < 1_000_000 ? "<1 MB" : formatter.string(fromByteCount: bytes)
+        spaceCache[category] = text
+        return text
+    }
+    func sidebarSpaceHelp(for category: Section) -> String {
+        if [.overview, .applications, .history, .settings].contains(category) { return category.title }
+        if !enabledCategories.contains(category.rawValue) { return "Categoria disattivata nelle impostazioni." }
+        if !hasScanned { return "Spazio disponibile dopo la scansione." }
+        if [.caches, .browsers, .logs].contains(category) && !didScanJunk { return "Categoria non esaminata: abilita la pulizia e ripeti la scansione." }
+        return category == .duplicates
+            ? "Spazio potenzialmente recuperabile eliminando le copie extra e conservando una copia per gruppo. Le categorie non si sommano."
+            : "Dimensione dei file da esaminare: scegli quali rimuovere. Le categorie possono sovrapporsi e non si sommano."
+    }
     func grouped(_ groups: [[FileEntry]]) -> [FileEntry] {
         groups.enumerated().flatMap { index, items in items.map { item in var f = item; f.groupID = "Gruppo \(index + 1)"; return f } }
     }
     var filtered: [FileEntry] {
+        let orderingSelection = sort == "selected" ? selected : []
+        if let cache = filteredCache[section], cache.query == query,
+           cache.sort == sort, cache.selection == orderingSelection { return cache.files }
         let all = files(for: section).filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) || $0.url.path.localizedCaseInsensitiveContains(query) }
-        return all.sorted {
+        let ordered = all.sorted {
             if [.duplicates, .names, .photos].contains(section), $0.groupID != $1.groupID { return ($0.groupID ?? "").localizedStandardCompare($1.groupID ?? "") == .orderedAscending }
             if sort == "name" { return $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             if sort == "date" { return $0.modified > $1.modified }
@@ -198,9 +253,17 @@ final class CancelFlag: @unchecked Sendable {
             if sort == "selected", selected.contains($0.id) != selected.contains($1.id) { return selected.contains($0.id) }
             return $0.size == $1.size ? $0.id < $1.id : $0.size > $1.size
         }
+        filteredCache[section] = (query, sort, orderingSelection, ordered)
+        return ordered
     }
     var visible: [FileEntry] { Array(filtered.dropFirst(page * perPage).prefix(perPage)) }
-    var selectedFiles: [FileEntry] { files(for: section).filter { selected.contains($0.id) } }
+    var selectedFiles: [FileEntry] {
+        guard !selected.isEmpty else { return [] }
+        if let cache = selectionCache, cache.section == section, cache.ids == selected { return cache.files }
+        let entries = files(for: section).filter { selected.contains($0.id) }
+        selectionCache = (section, selected, entries)
+        return entries
+    }
     func open(_ category: Section) {
         section = category; selected = []; query = ""; page = 0
         if category == .photos { sort = "capture" } else if sort == "capture" { sort = "size" }
@@ -424,7 +487,7 @@ struct ContentView: View {
                     if m.busy { ProgressView().controlSize(.small); Text(m.isRemoving ? m.status : "\(m.scanned) file esaminati") }
                     else { Text(m.status).lineLimit(2) }
                     Spacer()
-                    Text("MacSweep · 0.1.1").foregroundStyle(.secondary)
+                    Text("MacSweep · 0.1.4").foregroundStyle(.secondary)
                 }.font(.caption).padding(.horizontal, 22).frame(height: 48)
             }.background(Theme.panel)
         }
@@ -454,7 +517,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 14).padding(.leading, 10).padding(.bottom, 6)
             ForEach(categories) { category in
-                NavigationSectionButton(category: category, selected: m.section == category) { m.open(category) }
+                NavigationSectionButton(category: category, selected: m.section == category, space: m.sidebarSpace(for: category), spaceHelp: m.sidebarSpaceHelp(for: category)) { m.open(category) }
             }
         }
     }
@@ -521,7 +584,7 @@ struct ContentView: View {
                 List(m.visible) { file in
                     HStack(spacing: 12) {
                         Toggle("Seleziona \(file.name)", isOn: Binding(get: { m.selected.contains(file.id) }, set: { if $0 { m.selected.insert(file.id) } else { m.selected.remove(file.id) } })).labelsHidden().toggleStyle(.checkbox).disabled(m.busy)
-                        Image(nsImage: NSWorkspace.shared.icon(forFile: file.url.path)).resizable().frame(width: 30, height: 30)
+                        Image(nsImage: FileTypeIcons.image(for: file.url)).resizable().frame(width: 30, height: 30)
                         VStack(alignment: .leading, spacing: 4) {
                             HStack { Text(file.name).fontWeight(.medium).lineLimit(1); if let group = file.groupID { Text(group).font(.caption2).foregroundStyle(Theme.accent) } }
                             Text(file.url.path).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(file.url.path)
@@ -662,16 +725,42 @@ struct BrandMark: View {
     }
 }
 
+@MainActor enum FileTypeIcons {
+    private static let cache = NSCache<NSString, NSImage>()
+    static func image(for url: URL) -> NSImage {
+        let ext = url.pathExtension.lowercased()
+        if let image = cache.object(forKey: ext as NSString) { return image }
+        let image = NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
+        cache.countLimit = 128
+        cache.setObject(image, forKey: ext as NSString)
+        return image
+    }
+}
+
 struct NavigationSectionButton: View {
     let category: Section
     let selected: Bool
+    let space: String?
+    let spaceHelp: String
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Label(category.title, systemImage: category.icon)
-                .font(.system(size: 12.5))
+            HStack(spacing: 6) {
+                Label(category.title, systemImage: category.icon)
+                    .font(.system(size: 12.5))
+                    .lineLimit(1)
+                Spacer(minLength: 2)
+                if let space {
+                    Text(space)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(selected ? Color.primary : Color.secondary)
+                        .fixedSize()
+                }
+            }
+                .help(spaceHelp)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10).padding(.vertical, 9)
                 // The hit target includes the entire row, including clear space.

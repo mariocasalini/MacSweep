@@ -46,3 +46,13 @@ NavigationSectionButton owns each complete sidebar row. Text, icon and padded
 empty space activate the same section. Hover highlights the row. The overview
 category cards likewise activate from their complete padded bounds. Native
 Button focus and keyboard activation remain canonical.
+
+Sidebar space badges use Model.sidebarSpace, independent of filters/selection.
+Duplicate savings retain one deterministic copy per group; other categories show
+reviewable candidate sizes, never guaranteed savings. Unknown/unscanned is —,
+scanning is …, disabled is Off, known empty is 0 MB. Management rows have no
+file-space estimate. Tooltips explain overlap; categories must not be summed.
+
+Large duplicate candidates use a rejecting-only sample prefilter; full SHA-256 remains the equality authority. Phase feedback distinguishes inventory, comparison and photo analysis.
+
+Navigation performance: Model owns cached category inventories, formatted space badges, per-section search/order results and selected entries. Result, junk, download-root and enabled-category mutations invalidate all derived data. Query/order and selection-first ordering use explicit cache keys; page changes reuse the ordered collection. Empty selection returns immediately. File list icons use a bounded shared file-type icon cache and do not query each file path during rendering.

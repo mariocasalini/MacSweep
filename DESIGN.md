@@ -70,3 +70,12 @@ Never preselect results or call approximate photo groups visually identical.
 NavigationSectionButton owns full-row rectangular hit testing and a quiet hover
 fill. Overview card labels also define a rectangular hit area spanning padding.
 Native Button semantics and keyboard behavior are preserved.
+
+Sidebar space badges use Model.sidebarSpace, independent of filters/selection.
+Duplicate savings retain one deterministic copy per group; other categories show
+reviewable candidate sizes, never guaranteed savings. Unknown/unscanned is —,
+scanning is …, disabled is Off, known empty is 0 MB. Management rows have no
+file-space estimate. Tooltips explain overlap; categories must not be summed.
+
+File result rows use native type icons from a shared bounded cache. Navigation
+reuses Model-owned derived lists and totals; changes to scan data invalidate them.

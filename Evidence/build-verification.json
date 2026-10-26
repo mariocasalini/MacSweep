@@ -1,17 +1,19 @@
 {
   "artifact": "MacSweep.app.zip",
-  "sha256": "b3fe1570950fa123e7d5ce320d3239056ed36622d9a8478c731d0ca8cbc9caf9",
-  "bytes": 2359528,
+  "sha256": "8f2e1e24f128b5d4a6ec1378a5dacf91ef61d823b23ba559f6a34a5e4574fa23",
+  "bytes": 2374860,
   "architecture": "arm64",
   "deploymentTarget": "macOS 13.0",
   "testedOS": "macOS 26.2",
   "signature": "ad-hoc; verified --deep --strict after archive extraction into local temporary directory",
   "notarized": false,
-  "scannerFixtureChecks": 27,
+  "scannerFixtureChecks": 30,
   "safetyFixtureChecks": 13,
   "junkFixtureChecks": 20,
-  "totalFixtureChecks": 60,
-  "version": "0.1.1",
-  "fixtureChecksNote": "60 checks from preceding functional build; not rerun for this icon and hit-area-only update",
-  "uiVerification": "Isolated native preview: whitespace clicks on Download and Duplicati sidebar rows, Panoramica row, and empty Download card corner all navigated correctly. New sidebar logo visually verified. Strict UI audit: 0 findings."
+  "totalFixtureChecks": 63,
+  "version": "0.1.4",
+  "fixtureChecksNote": "63 scanner/safety/junk fixture checks passed; navigation model benchmark and invalidation assertions passed",
+  "uiVerification": "Isolated native preview with 80,000 synthetic entries: Largest -> Duplicates -> Largest passed. Strict UI audit 0 findings.",
+  "performanceEvidence": "Evidence/scan-performance.md",
+  "navigationEvidence": "Evidence/navigation-performance.md"
 }

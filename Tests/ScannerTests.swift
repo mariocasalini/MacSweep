@@ -156,6 +156,25 @@ struct ScannerTests {
         let equalResult = scanner.scan(options: ScanOptions(roots: [equalAttributes], minDuplicateSize: 0))
         expect(equalResult.photoSeriesGroups.isEmpty && equalResult.duplicateGroups.count == 1,
                "Equal-size equal-capture-date groups are suppressed as photo series while duplicates remain detectable")
+        let sampledRoot = root.appendingPathComponent("SampledComparison")
+        try manager.createDirectory(at: sampledRoot, withIntermediateDirectories: true)
+        let large = Data(repeating: 0x55, count: 1_048_576)
+        try large.write(to: sampledRoot.appendingPathComponent("a.bin"))
+        try large.write(to: sampledRoot.appendingPathComponent("b.bin"))
+        var sameSamples = large
+        sameSamples[100_000] = 0x99
+        try sameSamples.write(to: sampledRoot.appendingPathComponent("different-between-samples.bin"))
+        try Data(repeating: 0x66, count: large.count).write(to: sampledRoot.appendingPathComponent("different-sample.bin"))
+        let sampled = scanner.scan(options: ScanOptions(roots: [sampledRoot]))
+        expect(sampled.files.count == 4 && sampled.issues.isEmpty, "Sample prefilter preserves inventory")
+        expect(sampled.duplicateGroups.count == 1 && Set(sampled.duplicateGroups[0].map(\.name)) == Set(["a.bin", "b.bin"]), "Sample collisions require full SHA-256; only exact content matches")
+        var comparisonStarted = false
+        var comparisonChecks = 0
+        let stoppedSample = scanner.scan(options: ScanOptions(roots: [sampledRoot]), cancelled: {
+            if comparisonStarted { comparisonChecks += 1 }
+            return comparisonChecks > 4
+        }, phase: { if $0 == "Confronto dei duplicati…" { comparisonStarted = true } })
+        expect(stoppedSample.files.count == 4 && stoppedSample.duplicateGroups.isEmpty, "Cancellation during sampled comparison keeps inventory without incomplete groups")
         print("Scanner: \(assertionCount) fixture checks passed")
     }
 

@@ -50,7 +50,8 @@ final class Scanner {
         .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey,
     ]
 
-    func scan(options: ScanOptions, cancelled: () -> Bool = { false }, progress: (Int) -> Void = { _ in }) -> ScanResult {
+    func scan(options: ScanOptions, cancelled: () -> Bool = { false }, progress: (Int) -> Void = { _ in }, phase: (String) -> Void = { _ in }) -> ScanResult {
+        phase("Lettura delle cartelle…")
         var files: [FileEntry] = []
         var issues: [String] = []
         var visited = Set<String>()
@@ -141,15 +142,30 @@ final class Scanner {
         }
         progress(scannedCount)
         let candidates = files.filter { $0.size >= max(0, options.minDuplicateSize) }
+        if options.findDuplicates && !cancelled() { phase("Confronto dei duplicati…") }
         var duplicates: [[FileEntry]] = []
         for (_, sameSize) in Dictionary(grouping: candidates, by: \.size).sorted(by: { $0.key < $1.key }) where options.findDuplicates && sameSize.count > 1 {
             if cancelled() { break }
+            // Sampling can only reject candidates; full SHA-256 still proves equality.
+            var sampleBuckets: [String: [FileEntry]] = [:]
+            if sameSize[0].size > 3 * 64 * 1024 {
+                for file in sameSize {
+                    if cancelled() { break }
+                    do {
+                        if let sample = try hash(file, sampled: true, cancelled: cancelled) {
+                            sampleBuckets[sample, default: []].append(file)
+                        }
+                    } catch { issue("Confronto non completato per \(file.url.path): \(error.localizedDescription)") }
+                }
+            } else { sampleBuckets["small"] = sameSize }
             var hashes: [String: [FileEntry]] = [:]
-            for file in sameSize {
-                if cancelled() { break }
-                do {
-                    if let digest = try hash(file, cancelled: cancelled) { hashes[digest, default: []].append(file) }
-                } catch { issue("Confronto non completato per \(file.url.path): \(error.localizedDescription)") }
+            for bucket in sampleBuckets.values where bucket.count > 1 {
+                for file in bucket {
+                    if cancelled() { break }
+                    do {
+                        if let digest = try hash(file, cancelled: cancelled) { hashes[digest, default: []].append(file) }
+                    } catch { issue("Confronto non completato per \(file.url.path): \(error.localizedDescription)") }
+                }
             }
             // A cancelled group must not be presented as a completed comparison.
             if cancelled() { break }
@@ -162,6 +178,7 @@ final class Scanner {
             let ordered = group.sorted { $0.url.path < $1.url.path }
             return ordered.map { item in var item = item; item.groupID = "name:\(ordered[0].id)"; return item }
         }.sorted { (left: [FileEntry], right: [FileEntry]) in left[0].name.localizedStandardCompare(right[0].name) == .orderedAscending }
+        if options.findPhotoSeries && !cancelled() { phase("Lettura delle date delle foto…") }
         let photoSeries = cancelled() || !options.findPhotoSeries ? [] : makePhotoSeries(files, interval: max(0, options.photoSeriesInterval), cancelled: cancelled)
         return ScanResult(files: files.sorted { $0.size == $1.size ? $0.id < $1.id : $0.size > $1.size },
                           duplicateGroups: duplicates.sorted { $0[0].id < $1[0].id },
@@ -170,6 +187,7 @@ final class Scanner {
     }
 
     private func isScreenshot(_ url: URL) -> Bool {
+        guard imageExtensions.contains(url.pathExtension.lowercased()) else { return false }
         if let metadata = MDItemCreateWithURL(kCFAllocatorDefault, url as CFURL),
            let value = MDItemCopyAttribute(metadata, "kMDItemIsScreenCapture" as CFString) as? Bool, value { return true }
         // Filename matching is an explicit heuristic when Spotlight has no flag.
@@ -182,7 +200,7 @@ final class Scanner {
         try hash(file, cancelled: cancelled)
     }
 
-    private func hash(_ file: FileEntry, cancelled: () -> Bool) throws -> String? {
+    private func hash(_ file: FileEntry, sampled: Bool = false, cancelled: () -> Bool) throws -> String? {
         var current = stat()
         guard lstat(file.url.path, &current) == 0, current.st_mode & S_IFMT == S_IFREG,
               current.st_flags & UInt32(SF_DATALESS) == 0,
@@ -205,10 +223,20 @@ final class Scanner {
               before.st_mtimespec.tv_sec == current.st_mtimespec.tv_sec,
               before.st_mtimespec.tv_nsec == current.st_mtimespec.tv_nsec else { throw ScannerError.changed }
         var hasher = SHA256()
-        while true {
-            if cancelled() { return nil }
-            guard let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty else { break }
-            hasher.update(data: chunk)
+        if sampled {
+            let length = 64 * 1024
+            for offset in [Int64(0), (file.size - Int64(length)) / 2, file.size - Int64(length)] {
+                if cancelled() { return nil }
+                try handle.seek(toOffset: UInt64(offset))
+                guard let chunk = try handle.read(upToCount: length), chunk.count == length else { throw ScannerError.changed }
+                hasher.update(data: chunk)
+            }
+        } else {
+            while true {
+                if cancelled() { return nil }
+                guard let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty else { break }
+                hasher.update(data: chunk)
+            }
         }
         var after = stat()
         var namedAfter = stat()
@@ -256,9 +284,14 @@ final class Scanner {
         // and ev_a67ea1610ceef9954016e50316ba0d9fb788527991eaefa3bc1d91efc8f49ade.
         var series: [[FileEntry]] = []
         var dated: [(FileEntry, Date)] = []
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.isLenient = false
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         for file in files where imageExtensions.contains(file.url.pathExtension.lowercased()) {
             if cancelled() { return series }
-            if let date = captureDate(file) { dated.append((file, date)) }
+            if let date = captureDate(file, formatter: formatter) { dated.append((file, date)) }
         }
         dated.sort { $0.1 == $1.1 ? $0.0.id < $1.0.id : $0.1 > $1.1 }
         var group: [(FileEntry, Date)] = []
@@ -285,7 +318,7 @@ final class Scanner {
         return series.sorted { $0[0].id < $1[0].id }
     }
 
-    private func captureDate(_ file: FileEntry) -> Date? {
+    private func captureDate(_ file: FileEntry, formatter: DateFormatter) -> Date? {
         // No filesystem-date fallback. The original also tries an ISOBMFF
         // parser after ExifParcer; that fallback is not implemented here, so
         // HEIC/container-only capture metadata can remain ungrouped.
@@ -334,11 +367,6 @@ final class Scanner {
               after.st_mtimespec.tv_nsec == state.st_mtimespec.tv_nsec,
               namedAfter.st_ino == after.st_ino, namedAfter.st_dev == after.st_dev,
               file.url.resolvingSymlinksInPath().path == file.url.standardizedFileURL.path else { return nil }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.isLenient = false
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
         return formatter.date(from: original)
     }
 }

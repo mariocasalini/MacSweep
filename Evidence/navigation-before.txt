@@ -1,0 +1,2 @@
+Navigation: 30.1451 seconds; checksum 4390020
+PASS navigation cache invalidation, search, sorting, selection, removal, categories, junk, download roots
